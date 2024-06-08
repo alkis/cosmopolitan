@@ -37,12 +37,12 @@ strcat(const string_view lhs, const string_view rhs) noexcept
         memcpy(res.data(), lhs.p, lhs.n);
     if (rhs.n)
         memcpy(res.data() + lhs.n, rhs.p, rhs.n);
-    if (res.isbig()) {
-        res.big()->n = lhs.n + rhs.n;
+    if (res.islarge()) {
+        res.large()->n = lhs.n + rhs.n;
     } else {
-        res.small()->rem = __::sso_max - lhs.n - rhs.n;
+        res.set_small_size(lhs.n + rhs.n);
     }
-    res.data()[res.size()] = 0;
+    res.data()[lhs.n + rhs.n] = 0;
     return res;
 }
 

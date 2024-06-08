@@ -11,37 +11,6 @@ class string;
 string
 strcat(const string_view, const string_view) noexcept __wur;
 
-namespace __ {
-
-constexpr size_t string_size = 3 * sizeof(size_t);
-constexpr size_t sso_max = string_size - 1;
-constexpr size_t big_mask = ~(1ull << (8ull * sizeof(size_t) - 1ull));
-
-struct small_string
-{
-    char buf[sso_max];
-    // interpretation is: size == sso_max - rem
-    unsigned char rem;
-#if 0
-    size_t rem : 7;
-    size_t big : 1 /* = 0 */;
-#endif
-};
-
-struct big_string
-{
-    char* p;
-    size_t n;
-    // interpretation is: capacity == c & big_mask
-    size_t c;
-#if 0
-    size_t c : sizeof(size_t) * 8 - 1;
-    size_t big : 1 /* = 1 */;
-#endif
-};
-
-} // namespace __
-
 class string
 {
   public:
@@ -89,7 +58,7 @@ class string
 
     void swap(string& s) noexcept
     {
-        char tmp[__::string_size];
+        char tmp[string_size];
         __builtin_memcpy(tmp, __builtin_launder(blob), sizeof(tmp));
         __builtin_memcpy(
           __builtin_launder(blob), __builtin_launder(s.blob), sizeof(tmp));
@@ -107,8 +76,8 @@ class string
 
     void clear() noexcept
     {
-        if (isbig()) {
-            big()->n = 0;
+        if (islarge()) {
+            large()->n = 0;
         } else {
             set_small_size(0);
         }
@@ -116,26 +85,27 @@ class string
 
     bool empty() const noexcept
     {
-        return isbig() ? !big()->n : small()->rem >= __::sso_max;
+        return islarge() ? !large()->n : small()->rem == (sso_max << (is_le ? 0 : 1));
     }
 
     inline char* data() noexcept
     {
-        return isbig() ? big()->p : small()->buf;
+        return islarge() ? large()->p : small()->buf;
     }
 
     inline const char* data() const noexcept
     {
-        return isbig() ? big()->p : small()->buf;
+        return islarge() ? large()->p : small()->buf;
     }
 
     inline size_t size() const noexcept
     {
 #if 0
-        if (!isbig() && small()->rem > __::sso_max)
+        if (!islarge() && small()->rem > sso_max)
             __builtin_trap();
 #endif
-        return isbig() ? big()->n : __::sso_max - small()->rem;
+        return islarge() ? large()->n
+                         : (sso_max - small()->rem) >> (is_le ? 0 : 1);
     }
 
     size_t length() const noexcept
@@ -146,10 +116,11 @@ class string
     size_t capacity() const noexcept
     {
 #if 0
-        if (isbig() && big()->c <= __::sso_max)
+        if (islarge() && large()->c <= __::sso_max)
             __builtin_trap();
 #endif
-        return isbig() ? __::big_mask & big()->c : __::string_size;
+        return islarge() ? (is_le ? large()->c & ~msb : large()->c >> 1)
+                         : sso_max;
     }
 
     iterator begin() noexcept
@@ -286,67 +257,83 @@ class string
     }
 
   private:
-    inline bool isbig() const noexcept
+    static constexpr size_t string_size = 3 * sizeof(size_t);
+    static constexpr size_t sso_max = string_size - 1;
+    static constexpr size_t msb = ~size_t{0} << (8 * sizeof(size_t) - 1);
+    static constexpr bool is_le = __BYTE_ORDER__ == __ORDER_LITTLE_ENDIAN__;
+
+    struct large_rep
     {
-        return *(__builtin_launder(blob) + __::sso_max) & 0x80;
+        char* p;
+        size_t n;
+        // capacity = little_endian ? c & 0x7FFF : c >> 1
+        size_t c;
+    };
+    struct small_rep
+    {
+        char buf[sso_max];
+        // size = little_endian ? sso_max - rem : (sso_max - rem) << 1
+        unsigned char rem;
+    };
+
+    bool islarge() const noexcept
+    {
+        return *(__builtin_launder(blob) + sso_max) & (is_le ? 0x80 : 0x01);
     }
 
-    inline void set_small_size(size_t size) noexcept
+    void set_small_size(size_t size) noexcept
     {
-        if (size > __::sso_max)
+        if (size > sso_max)
             __builtin_trap();
-        *(__builtin_launder(blob) + __::sso_max) = (__::sso_max - size);
+        small()->rem = (sso_max - size) << (is_le ? 0 : 1);
     }
 
-    inline void set_big_capacity(size_t c2) noexcept
+    void set_large_capacity(size_t c) noexcept
     {
-        if (c2 > __::big_mask)
+        if (c & msb)
             __builtin_trap();
-        *(__builtin_launder(blob) + __::sso_max) = 0x80;
-        big()->c &= ~__::big_mask;
-        big()->c |= c2;
+        large()->c = is_le ? c | msb : c << 1;
     }
 
-    inline __::small_string* small() noexcept
+    small_rep* small() noexcept
     {
-        if (isbig())
+        if (islarge())
             __builtin_trap();
-        return __builtin_launder(reinterpret_cast<__::small_string*>(blob));
+        return __builtin_launder(reinterpret_cast<small_rep*>(blob));
     }
 
-    inline const __::small_string* small() const noexcept
+    const small_rep* small() const noexcept
     {
-        if (isbig())
+        if (islarge())
             __builtin_trap();
         return __builtin_launder(
-          reinterpret_cast<const __::small_string*>(blob));
+          reinterpret_cast<const small_rep*>(blob));
     }
 
-    inline __::big_string* big() noexcept
+    large_rep* large() noexcept
     {
-        if (!isbig())
+        if (!islarge())
             __builtin_trap();
-        return __builtin_launder(reinterpret_cast<__::big_string*>(blob));
+        return __builtin_launder(reinterpret_cast<large_rep*>(blob));
     }
 
-    inline const __::big_string* big() const noexcept
+    const large_rep* large() const noexcept
     {
-        if (!isbig())
+        if (!islarge())
             __builtin_trap();
-        return __builtin_launder(reinterpret_cast<const __::big_string*>(blob));
+        return __builtin_launder(reinterpret_cast<const large_rep*>(blob));
     }
 
     friend string strcat(const string_view, const string_view);
 
-    alignas(union {
-        __::big_string a;
-        __::small_string b;
-    }) char blob[__::string_size];
+    union {
+        small_rep s;
+        large_rep l;
+        char blob[string_size];
+    };
+    static_assert(sizeof(string::small_rep) == sizeof(string::large_rep));
+    static_assert(sizeof(string::large_rep) == sizeof(string::blob));
 };
-
-static_assert(sizeof(string) == __::string_size);
-static_assert(sizeof(__::small_string) == __::string_size);
-static_assert(sizeof(__::big_string) == __::string_size);
 
 } // namespace ctl
 
